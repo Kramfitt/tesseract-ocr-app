@@ -3,17 +3,42 @@ from flask_cors import CORS
 from PIL import Image
 import pytesseract
 import io
+import re
 import os
 
 app = Flask(__name__)
 CORS(app)
+
+# Configuration
+MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB limit
+MAX_IMAGE_DIMENSION = 2400  # Maximum width or height
+
+def optimize_image(image):
+    """Optimize image for OCR processing"""
+    # Convert to RGB if needed
+    if image.mode not in ('L', 'RGB'):
+        image = image.convert('RGB')
+    
+    # Resize if too large while maintaining aspect ratio
+    if max(image.size) > MAX_IMAGE_DIMENSION:
+        ratio = MAX_IMAGE_DIMENSION / max(image.size)
+        new_size = tuple(int(dim * ratio) for dim in image.size)
+        image = image.resize(new_size, Image.Resampling.LANCZOS)
+    
+    return image
+
+def find_menu_week(text):
+    """Extract menu week pattern from text"""
+    pattern = r'(Summer|Winter)\s+Menu\s+Week\s+\d+'
+    match = re.search(pattern, text)
+    return match.group(0) if match else None
 
 # HTML template for the upload interface
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
 <head>
-    <title>OCR App</title>
+    <title>Menu Week Detector</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -33,10 +58,12 @@ HTML_TEMPLATE = '''
         }
         .result {
             margin-top: 20px;
-            white-space: pre-wrap;
-            background-color: #f8f9fa;
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #2c3e50;
             padding: 15px;
             border-radius: 4px;
+            background-color: #f8f9fa;
         }
         .error {
             color: red;
@@ -50,13 +77,13 @@ HTML_TEMPLATE = '''
 </head>
 <body>
     <div class="container">
-        <h1>OCR Text Extraction</h1>
-        <p>Upload an image to extract text using Tesseract OCR.</p>
+        <h1>Menu Week Detector</h1>
+        <p>Upload an image to detect Summer/Winter Menu Week.</p>
         
         <div class="upload-form">
             <form id="uploadForm">
                 <input type="file" id="imageFile" accept="image/*" required>
-                <button type="submit">Extract Text</button>
+                <button type="submit">Detect Menu Week</button>
             </form>
             <div id="loading" class="loading">Processing...</div>
         </div>
@@ -95,7 +122,11 @@ HTML_TEMPLATE = '''
                 const data = await response.json();
                 
                 if (response.ok) {
-                    resultDiv.textContent = data.text || 'No text was extracted from the image.';
+                    if (data.menu_week) {
+                        resultDiv.textContent = data.menu_week;
+                    } else {
+                        errorDiv.textContent = 'No menu week pattern found in the image.';
+                    }
                 } else {
                     errorDiv.textContent = data.error || 'An error occurred during processing.';
                 }
@@ -123,6 +154,14 @@ def ocr():
     
     if not file.filename:
         return jsonify({'error': 'No selected file'}), 400
+
+    # Check file size
+    file_content = file.read()
+    if len(file_content) > MAX_IMAGE_SIZE:
+        return jsonify({'error': 'File size must be less than 5MB'}), 400
+    
+    # Reset file pointer
+    file_stream = io.BytesIO(file_content)
         
     # Check file extension
     allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff'}
@@ -132,19 +171,26 @@ def ocr():
 
     try:
         # Read the image
-        image = Image.open(file.stream)
+        image = Image.open(file_stream)
         
-        # Convert image to RGB if necessary
+        # Convert to RGB if necessary
         if image.mode not in ('L', 'RGB'):
             image = image.convert('RGB')
             
-        # Extract text
-        text = pytesseract.image_to_string(image)
+        # Extract text with specific configuration for text detection
+        text = pytesseract.image_to_string(
+            image,
+            config='--psm 6'  # Assume uniform block of text
+        )
         
-        if not text.strip():
-            return jsonify({'text': 'No text was detected in the image.'})
+        # Find menu week pattern
+        menu_week = find_menu_week(text)
+        
+        if menu_week:
+            return jsonify({'menu_week': menu_week})
+        else:
+            return jsonify({'error': 'No menu week pattern found in the image.'}), 404
             
-        return jsonify({'text': text})
     except Exception as e:
         return jsonify({'error': f'Error processing image: {str(e)}'}), 500
 
